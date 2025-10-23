@@ -1,0 +1,181 @@
+#!/bin/bash
+
+set -e
+
+invalid=""
+help=""
+ssh_command="ssh"
+ssh_port=""
+ssh_password=""
+sudo_password=""
+ask_ssh_password=""
+ask_sudo_password=""
+do_update=""
+
+check_single_line_arg() {
+    lines="`echo "$1" | wc -l`"
+    test "$lines" = 1
+}
+
+options="`getopt -o hc:p:s:S:a:A:u --long help --long ssh-command: --long port: --long ssh-password: --long sudo-password: \
+                 --long ask-ssh-password --long ask-sudo-password --long update\
+                 -- "$@"`"
+
+if [ "$?" -eq "0" ]; then
+    eval set -- "$options"
+    args=("$@")
+    while [ "$1" != "--" ]; do
+        case "$1" in
+        --help|-h)
+            help=1;;
+        --ssh-command|-c)
+            ssh_command="$2"
+            shift;;
+        --port|-p)
+            ssh_port="$2"
+            shift;;
+        --ssh-password|-s)
+            ssh_password="$2"
+            shift;;
+        --sudo-password|-S)
+            sudo_password="$2"
+            shift;;
+        --ask-ssh-password|-a)
+            ask_ssh_password=1;;
+        --ask-sudo-password|-A)
+            ask_sudo_password=1;;
+        --update|-u)
+            do_update=1;;
+        *)
+            invalid=1;;
+        esac
+        shift
+    done
+    shift
+else
+    invalid=1
+fi
+
+if [ "$#" -ne 2 ]; then
+    invalid=1
+fi
+
+if [ -n "$help" ]; then
+    echo "Usage:" 1>&2
+    echo "$0 [options] hostname debian-package" 1>&2
+    echo "" 1>&2
+    echo "Arguments:" 1>&2
+    echo "  hostname                       - specify the hostname (maybe including user, like in ssh command)" 1>&2
+    echo "  debian-package                 - specify the debian package to be installed" 1>&2
+    echo "" 1>&2
+    echo "Options:" 1>&2
+    echo "  -c --ssh-command <cmd>         - set the ssh command (default: \"ssh\")" 1>&2
+    echo "  -p --port <port>               - specify the port where to connect" 1>&2
+    echo "  -s --ssh-password <password>   - set ssh password" 1>&2
+    echo "  -S --sudo-password <password>  - set sudo password" 1>&2
+    echo "  -a --ask-ssh-password          - ask for ssh password" 1>&2
+    echo "  -A --ask-sudo-password         - ask for sudo password" 1>&2
+    echo "  -u --update                    - perform also an \"apt-get update\" before installing" 1>&2
+    echo "" 1>&2
+fi
+
+if [ -n "$invalid" ]; then
+    echo "Error: invalid options" 1>&2
+    echo "for help use: $0 --help" 1>&2
+    exit 1
+fi
+
+ssh_host="$1"
+debian_package="$2"
+
+if [ -n "$ask_ssh_password" ]; then
+    if [ -z "$ssh_password" ]; then
+        read -s -p "ssh password: " ssh_password
+        echo
+    else
+        echo "Error: You cannot combine --ssh-password with --ask-ssh-password" 1>&2
+        exit 2
+    fi
+fi
+
+if [ -n "$ask_sudo_password" ]; then
+    if [ -z "$sudo_password" ]; then
+        read -s -p "sudo password: " sudo_password
+        echo
+    else
+        echo "Error: You cannot combine --sudo-password with --ask-sudo-password" 1>&2
+        exit 2
+    fi
+fi
+
+if ! check_single_line_arg "$sudo_password"; then
+    echo "Error: Sudo password cannot contain newlines" 1>&2
+    exit 3
+fi
+
+if ! check_single_line_arg "$debian_package"; then
+    echo "Error: debian package cannot contain newlines" 1>&2
+    exit 3
+fi
+
+if echo "$debian_package" | grep -qv '\.deb$'; then
+    echo "Error: debian package must end with .deb" 1>&2
+    exit 3
+fi
+
+if [ ! -e "$debian_package" ]; then
+    echo "Error: debian package does not exist" 1>&2
+    exit 4
+fi
+
+if [ -n "$do_update" ]; then
+    do_update="apt-get update"
+fi
+
+debian_package_basename="`basename "$debian_package"`"
+
+reader='sub f{my$s="";while(sysread STDIN,$x,1){$s.=$x;last if($x eq "\n");}return $s;}$t=&f;$s="";while(($l=&f)ne""&&$l ne$t){$s.=$l}'
+
+decryptor="$reader;exec(\"/bin/bash\",\"-c\",\$s);"
+decryptor="`echo -n "$decryptor" | base64 -w 0`"
+decryptor="use MIME::Base64;eval(decode_base64('$decryptor'))"
+args=("$ssh_command")
+if [ -n "$ssh_port" ]; then
+    args+=(-p "$ssh_port")
+fi
+args+=(-- "$ssh_host")
+
+if [ "$ssh_password" != "" ]; then
+    args=(sshpass -p "$ssh_password" "${args[@]}")
+fi
+
+script_extractor="$reader;print \$s"
+(cat <<-END
+DELIM
+read sudo_password
+dir="/tmp/updater-\$\$"
+mkdir "\$dir" && cd "\$dir" && \\
+    (perl -e '$script_extractor' > "script.sh") && \\
+    (perl -e '$script_extractor' > "arguments") && \\
+    (cat > "data") && \\
+    chmod +x "script.sh" && \\
+    (if [ "\`id -u\`" = 0 ]; then ./script.sh; else echo "\$sudo_password" | sudo -S ./script.sh; fi)
+rm -rf "\$dir"
+DELIM
+$sudo_password
+DELIM
+#!/bin/bash
+set -e
+echo
+debian_package="\`head -n 1 arguments\`"
+rm arguments
+mv "data" "\$debian_package"
+$do_update
+apt-get -y install "./\$debian_package"
+DELIM
+DELIM
+$debian_package_basename
+DELIM
+END
+cat "$debian_package"
+) | "${args[@]}" perl -e "\"$decryptor\""
