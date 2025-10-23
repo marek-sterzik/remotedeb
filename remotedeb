@@ -17,6 +17,21 @@ check_single_line_arg() {
     test "$lines" = 1
 }
 
+find_argv0() {
+    local dir
+    dir="`dirname "$1"`"
+    ifs_old="$IFS"
+    IFS=:
+    for p in $PATH; do
+        if [ "$dir" = "$p" ]; then
+            echo "`basename "$1"`"
+            return 0
+        fi
+    done
+    IFS="$ifs_old"
+    echo "$1"
+}
+
 options="`getopt -o hc:p:s:S:a:A:u --long help --long ssh-command: --long port: --long ssh-password: --long sudo-password: \
                  --long ask-ssh-password --long ask-sudo-password --long update\
                  -- "$@"`"
@@ -60,9 +75,11 @@ if [ "$#" -ne 2 ]; then
     invalid=1
 fi
 
+argv0="`find_argv0 "$0"`"
+
 if [ -n "$help" ]; then
     echo "Usage:" 1>&2
-    echo "$0 [options] hostname debian-package" 1>&2
+    echo "$argv0 [options] hostname debian-package" 1>&2
     echo "" 1>&2
     echo "Arguments:" 1>&2
     echo "  hostname                       - specify the hostname (maybe including user, like in ssh command)" 1>&2
@@ -82,7 +99,7 @@ fi
 
 if [ -n "$invalid" ]; then
     echo "Error: invalid options" 1>&2
-    echo "for help use: $0 --help" 1>&2
+    echo "for help use: $argv0 --help" 1>&2
     exit 1
 fi
 
